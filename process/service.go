@@ -38,8 +38,8 @@ type CreateTransferResult struct {
 //
 // Everything below runs in ONE database transaction:
 //  1. claim the idempotency key (or detect it is a duplicate and return the stored transfer)
-//  2. insert the transfer as PENDING
-//  3. lock both wallets in sorted-id order (prevents deadlocks between A->B and B->A)
+//  2. lock both wallets in sorted-id order (prevents deadlocks between A->B and B->A)
+//  3. insert the transfer as PENDING (after the locks, see comment below)
 //  4. insufficient funds -> PENDING -> FAILED, commit (so a retry returns the same FAILED result)
 //  5. otherwise move balances, write the two ledger entries, PENDING -> PROCESSED
 //
