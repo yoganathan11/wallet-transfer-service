@@ -80,17 +80,9 @@ func (s *TransferService) CreateTransfer(ctx context.Context, in CreateTransferI
 			}
 		}
 
-		// 2. Create PENDING transfer
-		now := s.now()
-		transfer, err := NewTransfer(transferID, in.IdempotencyKey, in.FromWalletID, in.ToWalletID, in.Amount, now)
-		if err != nil {
-			return err
-		}
-		if err := tx.InsertTransfer(ctx, transfer); err != nil {
-			return err
-		}
-
-		// 3. Lock wallets in a global order
+		// 2. Lock wallets in a global order. This MUST happen before inserting the transfer row:
+		// the foreign keys on transfers take a FOR KEY SHARE lock on both wallet rows, and that
+		// conflicts with FOR UPDATE held/requested by a concurrent transfer -> deadlock.
 		ids := []string{in.FromWalletID, in.ToWalletID}
 		sort.Strings(ids)
 		locked := make(map[string]*Wallet, 2)
@@ -100,6 +92,16 @@ func (s *TransferService) CreateTransfer(ctx context.Context, in CreateTransferI
 				return err // e.g. ErrWalletNotFound -> rollback, key not consumed
 			}
 			locked[id] = w
+		}
+
+		// 3. Create the PENDING transfer (wallet rows are already locked by us)
+		now := s.now()
+		transfer, err := NewTransfer(transferID, in.IdempotencyKey, in.FromWalletID, in.ToWalletID, in.Amount, now)
+		if err != nil {
+			return err
+		}
+		if err := tx.InsertTransfer(ctx, transfer); err != nil {
+			return err
 		}
 
 		// 4. Business failure is a recorded outcome, not a rollback
