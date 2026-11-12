@@ -38,8 +38,8 @@ type CreateTransferResult struct {
 //
 // Everything below runs in ONE database transaction:
 //  1. claim the idempotency key (or detect it is a duplicate and return the stored transfer)
-//  2. insert the transfer as PENDING
-//  3. lock both wallets in sorted-id order (prevents deadlocks between A->B and B->A)
+//  2. lock both wallets in sorted-id order (prevents deadlocks between A->B and B->A)
+//  3. insert the transfer as PENDING (after the locks, see comment below)
 //  4. insufficient funds -> PENDING -> FAILED, commit (so a retry returns the same FAILED result)
 //  5. otherwise move balances, write the two ledger entries, PENDING -> PROCESSED
 //
@@ -80,17 +80,9 @@ func (s *TransferService) CreateTransfer(ctx context.Context, in CreateTransferI
 			}
 		}
 
-		// 2. Create PENDING transfer
-		now := s.now()
-		transfer, err := NewTransfer(transferID, in.IdempotencyKey, in.FromWalletID, in.ToWalletID, in.Amount, now)
-		if err != nil {
-			return err
-		}
-		if err := tx.InsertTransfer(ctx, transfer); err != nil {
-			return err
-		}
-
-		// 3. Lock wallets in a global order
+		// 2. Lock wallets in a global order. This MUST happen before inserting the transfer row:
+		// the foreign keys on transfers take a FOR KEY SHARE lock on both wallet rows, and that
+		// conflicts with FOR UPDATE held/requested by a concurrent transfer -> deadlock.
 		ids := []string{in.FromWalletID, in.ToWalletID}
 		sort.Strings(ids)
 		locked := make(map[string]*Wallet, 2)
@@ -100,6 +92,16 @@ func (s *TransferService) CreateTransfer(ctx context.Context, in CreateTransferI
 				return err // e.g. ErrWalletNotFound -> rollback, key not consumed
 			}
 			locked[id] = w
+		}
+
+		// 3. Create the PENDING transfer (wallet rows are already locked by us)
+		now := s.now()
+		transfer, err := NewTransfer(transferID, in.IdempotencyKey, in.FromWalletID, in.ToWalletID, in.Amount, now)
+		if err != nil {
+			return err
+		}
+		if err := tx.InsertTransfer(ctx, transfer); err != nil {
+			return err
 		}
 
 		// 4. Business failure is a recorded outcome, not a rollback
